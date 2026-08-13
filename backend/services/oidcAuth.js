@@ -229,14 +229,16 @@ export async function handleOidcCallback(req) {
   });
 
   const claims = tokens.claims() || {};
-  const username = resolveOidcUsername(claims);
+  const userInfo = await client.fetchUserInfo(oidc, tokens.access_token, claims.sub);
+
+  const username = resolveOidcUsername(userInfo);
   if (!username) {
     throw Object.assign(new Error("OIDC identity did not include a usable username"), {
       status: 400,
     });
   }
 
-  const role = resolveOidcRole(username, claims);
+  const role = resolveOidcRole(username, userInfo);
   const user = ensureExternalUser(username, role);
   if (!user?.id || user.id < 0) {
     throw Object.assign(new Error("Failed to provision OIDC user"), { status: 500 });
