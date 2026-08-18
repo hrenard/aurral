@@ -4,6 +4,7 @@ import {
   ArrowLeft,
   Activity,
   AudioWaveform,
+  AlertTriangle,
   Ban,
   Library,
   Newspaper,
@@ -19,12 +20,11 @@ import {
   ACTIVITY_VIEWS,
   DEFAULT_ACTIVITY_VIEW,
   buildActivityPath,
+  buildWantedPath,
+  WANTED_VIEWS,
 } from "../navigation/activityNavConfig";
+import { DEFAULT_LIBRARY_VIEW, LIBRARY_VIEWS } from "../navigation/libraryNavConfig";
 import { useDiscoverRecent } from "../contexts/DiscoverRecentProvider";
-import {
-  getDiscoverArtistPath,
-  getDiscoverRecentPageLinkState,
-} from "../utils/discoverRecentNavigation";
 import { useStorageHealth } from "../hooks/useStorageHealth";
 import SidebarStageBackdrop, {
   getSidebarStageBackdropEnabled,
@@ -54,11 +54,7 @@ function Sidebar({ mode, width = 208, settingsMode = false }) {
   );
   const [ticketmasterConfigured, setTicketmasterConfigured] = useState(true);
   const [newsConfigured, setNewsConfigured] = useState(true);
-  const {
-    recentPages: discoverRecentPages,
-    clearRecentPages,
-    isDiscoverSectionActive,
-  } = useDiscoverRecent();
+  const { isDiscoverSectionActive } = useDiscoverRecent();
 
   useEffect(() => {
     setShowStageBackdrop(getSidebarStageBackdropEnabled(user?.id));
@@ -72,14 +68,14 @@ function Sidebar({ mode, width = 208, settingsMode = false }) {
   }, [user?.id]);
 
   const isIcons = mode === "icons" && isDesktop;
-  const currentDiscoverPath = `${location.pathname}${location.search}`;
-  const activeDiscoverRecentPath =
-    getDiscoverArtistPath(currentDiscoverPath) || currentDiscoverPath;
   const isOnSettings = location.pathname.startsWith("/settings");
+  const isOnLibrary = location.pathname === "/library" || location.pathname.startsWith("/library/");
   const isOnShows = location.pathname.startsWith("/shows");
   const isOnNews = location.pathname.startsWith("/discover/news");
+  const isOnWanted = location.pathname.startsWith("/activity/missing");
   const isOnActivity =
-    location.pathname.startsWith("/activity") || location.pathname.startsWith("/history");
+    !isOnWanted &&
+    (location.pathname.startsWith("/activity") || location.pathname.startsWith("/history"));
 
   const settingsTabs = useMemo(() => {
     if (!canAccessSettings) return [];
@@ -98,6 +94,15 @@ function Sidebar({ mode, width = 208, settingsMode = false }) {
     return segment || DEFAULT_SHOWS_FILTER;
   }, [isOnShows, location.pathname]);
 
+  const activeLibraryView = useMemo(() => {
+    if (!isOnLibrary) return null;
+    const segment = location.pathname.replace(/^\/library\/?/, "").split("/")[0];
+    const visibleViews = LIBRARY_VIEWS.filter(
+      (view) => !view.permission || user?.role === "admin" || !!user?.permissions?.[view.permission],
+    );
+    return visibleViews.some((view) => view.id === segment) ? segment : DEFAULT_LIBRARY_VIEW;
+  }, [isOnLibrary, location.pathname, user]);
+
   const activeActivityView = useMemo(() => {
     if (!isOnActivity) return null;
     if (location.pathname.startsWith("/history")) {
@@ -110,6 +115,11 @@ function Sidebar({ mode, width = 208, settingsMode = false }) {
     const segment = location.pathname.replace(/^\/activity\/?/, "").split("/")[0];
     return segment || DEFAULT_ACTIVITY_VIEW;
   }, [isOnActivity, location.pathname]);
+
+  const activeWantedView = useMemo(() => {
+    if (!isOnWanted) return null;
+    return new URLSearchParams(location.search).get("tab") === "cutoff" ? "cutoff" : "missing";
+  }, [isOnWanted, location.search]);
 
   const positionSidebarTooltip = useCallback((event) => {
     const link = event.currentTarget;
@@ -143,25 +153,35 @@ function Sidebar({ mode, width = 208, settingsMode = false }) {
       if (item.section === "discover") {
         return isDiscoverSectionActive;
       }
+      if (item.section === "library") return isOnLibrary;
       if (item.section === "shows") return isOnShows;
       if (item.section === "news") return isOnNews;
       if (item.section === "activity") return isOnActivity;
+      if (item.section === "wanted") return isOnWanted;
       if (item.path === "/discover" && location.pathname === "/") return true;
       return location.pathname === item.path;
     },
-    [isDiscoverSectionActive, isOnActivity, isOnNews, isOnShows, location.pathname],
+    [isDiscoverSectionActive, isOnActivity, isOnLibrary, isOnNews, isOnShows, isOnWanted, location.pathname],
   );
 
   const navItems = useMemo(() => {
+    const libraryViews = LIBRARY_VIEWS.filter(
+      (view) => !view.permission || user?.role === "admin" || !!user?.permissions?.[view.permission],
+    );
     const items = [
       {
         path: "/discover",
         label: "Discover",
         icon: Sparkles,
         section: "discover",
-        subnav: discoverRecentPages,
       },
-      { path: "/library", label: "Library", icon: Library },
+      {
+        path: "/library",
+        label: "Library",
+        icon: Library,
+        section: "library",
+        subnav: libraryViews,
+      },
       ...(ticketmasterConfigured
         ? [
             {
@@ -185,8 +205,8 @@ function Sidebar({ mode, width = 208, settingsMode = false }) {
           ]
         : []),
       {
-        path: "/playlists",
-        label: "Playlists",
+        path: "/flows",
+        label: "Flows",
         icon: AudioWaveform,
         permission: "accessFlow",
       },
@@ -196,7 +216,15 @@ function Sidebar({ mode, width = 208, settingsMode = false }) {
         label: "Activity",
         icon: Activity,
         section: "activity",
-        subnav: ACTIVITY_VIEWS,
+        subnav: ACTIVITY_VIEWS.filter((view) => view.id !== "missing"),
+      },
+      {
+        path: buildWantedPath(),
+        label: "Wanted",
+        icon: AlertTriangle,
+        section: "wanted",
+        subnav: WANTED_VIEWS,
+        permission: "accessFlow",
       },
       { path: "/blocklist", label: "Blocklist", icon: Ban },
     ];
@@ -204,7 +232,7 @@ function Sidebar({ mode, width = 208, settingsMode = false }) {
       (item) =>
         !item.permission || user?.role === "admin" || !!user?.permissions?.[item.permission],
     );
-  }, [discoverRecentPages, newsConfigured, ticketmasterConfigured, user]);
+  }, [newsConfigured, ticketmasterConfigured, user]);
 
   const translateClass = mode === "hidden" ? "-translate-x-full" : "translate-x-0";
 
@@ -244,29 +272,6 @@ function Sidebar({ mode, width = 208, settingsMode = false }) {
           >
             Trending
           </Link>
-          {item.subnav.length > 0 && <hr className="sidebar-subnav-separator" />}
-          {item.subnav.slice(0, 3).map((entry) => {
-            const active = activeId === entry.id;
-            return (
-              <Link
-                key={entry.id}
-                to={entry.path}
-                state={getDiscoverRecentPageLinkState(entry)}
-                className={`sidebar-subnav-link sidebar-subnav-link--recent${
-                  active ? " is-active" : ""
-                }`}
-                aria-current={active ? "page" : undefined}
-                title={entry.label}
-              >
-                <span className="sidebar-subnav-link__text">{entry.label}</span>
-              </Link>
-            );
-          })}
-          {item.subnav.length > 0 && (
-            <button type="button" className="sidebar-subnav-action" onClick={clearRecentPages}>
-              Clear recent
-            </button>
-          )}
         </nav>
       );
     }
@@ -276,10 +281,11 @@ function Sidebar({ mode, width = 208, settingsMode = false }) {
         {item.subnav.map((entry) => {
           const active = activeId === entry.id;
           const targetPath =
-            item.section === "activity"
+            entry.path ||
+            (item.section === "activity"
               ? buildActivityPath(entry.id)
-              : `${item.basePath}/${entry.id}`;
-          const showReviewAlert = item.section === "activity" && entry.id === "review" && hasReviewAlert;
+              : `${item.basePath}/${entry.id}`);
+          const showReviewAlert = item.section === "activity" && entry.id === "queue" && hasReviewAlert;
           return (
             <Link
               key={entry.id}
@@ -367,13 +373,15 @@ function Sidebar({ mode, width = 208, settingsMode = false }) {
               const active = isNavItemActive(item);
               const showActivityDot = item.section === "activity" && hasReviewAlert;
               const activeSubnavId =
-                item.section === "discover"
-                  ? discoverRecentPages.find((entry) => entry.path === activeDiscoverRecentPath)?.id
+                item.section === "library"
+                  ? activeLibraryView
                   : item.section === "shows"
                     ? activeShowsFilter
                     : item.section === "activity"
                       ? activeActivityView
-                      : null;
+                      : item.section === "wanted"
+                        ? activeWantedView
+                        : null;
 
               return (
                 <div key={item.path} className={getNavGroupClassName(item, active)}>

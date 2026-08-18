@@ -24,6 +24,7 @@ Use the web UI for most settings. Use these variables for Docker deployment sett
 | Variable | Purpose |
 | -------- | ------- |
 | `TRUST_PROXY` | Set when Aurral is behind a reverse proxy. |
+| `AURRAL_PUBLIC_URL` | Canonical public origin for OAuth callbacks (for example, `https://aurral.example.com`). |
 | `AUTH_PROXY_ENABLED` | Enable reverse-proxy authentication. Default header `x-forwarded-user`. |
 | `AUTH_PROXY_HEADER` | Custom header that contains the authenticated username. |
 | `AUTH_PROXY_DOMAIN` | Origin of your forwardAuth login page (for example, `https://auth.example.com`). Aurral adds it to the `connect-src` content security policy so pages can reach your authentication origin. |
@@ -47,6 +48,12 @@ Use the web UI for most settings. Use these variables for Docker deployment sett
 | `OIDC_LOGOUT_URL` | Optional IdP logout URL. When set, Aurral redirects there after clearing the local session. |
 | `OIDC_DOMAIN` | Optional IdP origin added to the `connect-src` content security policy. |
 | `SESSION_EXPIRY_HOURS` | Session lifetime in hours for password login, proxy auth, and native OIDC. Default `720` (30 days). |
+
+## Cross-origin clients
+
+| Variable | Purpose |
+| -------- | ------- |
+| `CORS_ORIGIN` | Comma-separated browser origins allowed to call Aurral's JSON API. Browser Subsonic clients do not need this setting. |
 
 ## Logging
 

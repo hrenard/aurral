@@ -259,16 +259,27 @@ function AppContent() {
                       <Route path="/discover/playlists/:presetId" element={<DiscoverPlaylistDetailPage />} />
                       <Route path="/discover/playlists" element={<DiscoverPlaylistsPage />} />
                       <Route path="/discover/news" element={<NewsPage />} />
-                      <Route path="/library" element={<LibraryPage />} />
                       <Route
-                        path="/playlists"
+                        path="/library/playlists"
                         element={
                           <PermissionRoute permission="accessFlow">
-                            <FlowPage />
+                            <FlowPage mode="playlists" />
                           </PermissionRoute>
                         }
                       />
-                      <Route path="/flow" element={<Navigate to="/playlists" replace />} />
+                      <Route path="/library/album/:albumId" element={<LibraryPage />} />
+                      <Route path="/library/artist/:artistId" element={<LibraryPage />} />
+                      <Route path="/library/:section?" element={<LibraryPage />} />
+                      <Route
+                        path="/flows"
+                        element={
+                          <PermissionRoute permission="accessFlow">
+                            <FlowPage mode="flows" />
+                          </PermissionRoute>
+                        }
+                      />
+                      <Route path="/playlists" element={<Navigate to="/library/playlists" replace />} />
+                      <Route path="/flow" element={<Navigate to="/flows" replace />} />
                       <Route path="/downloads" element={<Navigate to="/activity/queue" replace />} />
                       <Route path="/requests" element={<Navigate to="/activity/queue" replace />} />
                       <Route path="/history" element={<Navigate to="/activity/history" replace />} />

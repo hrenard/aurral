@@ -1,7 +1,6 @@
 import crypto from "crypto";
 import os from "os";
 import { dbOps, userOps } from "../db/helpers/index.js";
-import { getDefaultListenHistoryProfile } from "../services/listeningHistory.js";
 import { createSession, getSessionByToken } from "../config/session-helpers.js";
 import { hashPassword, verifyPassword, needsRehash } from "./passwordHash.js";
 
@@ -245,6 +244,7 @@ function buildPermissions(role, permissions) {
       changeMonitoring: true,
       deleteArtist: true,
       deleteAlbum: true,
+      deleteTrack: true,
     };
   }
   return {
@@ -510,11 +510,7 @@ function migrateLegacyAdmin() {
   const authPassword = settings.integrations?.general?.authPassword;
   if (!onboardingComplete || !authPassword) return;
   const hash = hashPassword(authPassword);
-  const created = userOps.createUser(authUser, hash, "admin", null);
-  const initialListenHistory = getDefaultListenHistoryProfile(settings);
-  if (created && initialListenHistory) {
-    userOps.updateUser(created.id, initialListenHistory);
-  }
+  userOps.createUser(authUser, hash, "admin", null);
 }
 
 export function resolveUser(username, password) {
@@ -540,6 +536,24 @@ export function resolveUser(username, password) {
   };
 }
 
+export function resolveSubsonicTokenUser(username, token, salt) {
+  if (!/^[a-f\d]{32}$/i.test(String(token || "")) || !String(salt || "")) return null;
+  if (
+    !safeCompare(
+      String(username || "").trim().toLowerCase(),
+      String(getAuthUser()).trim().toLowerCase(),
+    )
+  ) return null;
+
+  const matchedPassword = getAuthPassword().find((password) =>
+    safeCompare(
+      crypto.createHash("md5").update(`${password}${salt}`).digest("hex"),
+      token,
+    ),
+  );
+  return matchedPassword ? resolveUser(username, matchedPassword) : null;
+}
+
 function legacyAuth(username, password) {
   const authUser = getAuthUser();
   const passwords = getAuthPassword();
@@ -559,6 +573,7 @@ function legacyAuth(username, password) {
       changeMonitoring: true,
       deleteArtist: true,
       deleteAlbum: true,
+      deleteTrack: true,
     },
   };
 }
@@ -648,6 +663,7 @@ export const authMiddleware = (req, res, next) => {
     }
     if (
       /^\/api\/library\/stream\/[^/]+$/.test(req.path) ||
+      /^\/api\/library\/canonical-stream\/[^/]+$/i.test(req.path) ||
       /^\/api\/library\/file-stream\/[^/]+\/[^/]+$/i.test(req.path) ||
       /^\/api\/artists\/[a-f0-9-]{36}\/stream$/i.test(req.path) ||
       /^\/api\/weekly-flow\/stream\/[^/]+$/i.test(req.path) ||
@@ -663,6 +679,7 @@ export const authMiddleware = (req, res, next) => {
       req.path === "/api/auth/login" ||
       req.path === "/api/auth/oidc/login" ||
       req.path === "/api/auth/oidc/exchange"
+      || (req.method === "GET" && req.path === "/api/scrobbling/lastfm/link/callback")
     ) {
       return next();
     }

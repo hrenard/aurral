@@ -10,6 +10,9 @@ const repoRoot = join(__dirname, "..", "..");
 
 const RESET_TABLES = [
   "sessions",
+  "lastfm_link_states",
+  "subsonic_stars",
+  "play_events",
   "honker_task_runs",
   "slskd_transfer_history",
   "playlist_download_jobs",
@@ -30,11 +33,14 @@ const RESET_TABLES = [
   "settings",
 ];
 
-export async function createIsolatedStateDir(name = "test") {
+export async function createIsolatedStateDir(
+  name = "test",
+  { dataDirRelativePath = "data" } = {},
+) {
   const baseDir = await mkdtemp(
     join(tmpdir(), `aurral-${String(name || "test")}-`),
   );
-  const dataDir = join(baseDir, "data");
+  const dataDir = join(baseDir, dataDirRelativePath);
   const dbPath = join(dataDir, "aurral.test.db");
   await mkdir(dataDir, { recursive: true });
   return {

@@ -36,6 +36,7 @@ const DEFAULT_PERMISSIONS = {
   changeMonitoring: false,
   deleteArtist: false,
   deleteAlbum: false,
+  deleteTrack: false,
 };
 
 export const userOps = {
@@ -183,7 +184,7 @@ export const userOps = {
         : existing.listenHistoryUrl,
     );
     const resolvedUsername =
-      listenHistoryProvider === "koito" ? null : listenHistoryUsername;
+      ["koito", "local"].includes(listenHistoryProvider) ? null : listenHistoryUsername;
     const resolvedUrl =
       listenHistoryProvider === "koito" ? listenHistoryUrl : null;
     const lastfmUsername =

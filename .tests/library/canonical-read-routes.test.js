@@ -54,10 +54,38 @@ test("canonical track reads remove nested filesystem paths", async () => {
 
     const routes = new Map();
     registerTracks({
+      delete(routePath, ...handlers) {
+        routes.set(routePath, async (req, res) => {
+          let index = 0;
+          const next = () => {
+            const handler = handlers[index++];
+            return handler ? handler(req, res, next) : undefined;
+          };
+          return next();
+        });
+      },
       get(routePath, ...handlers) {
         routes.set(routePath, handlers.at(-1));
       },
     });
+
+    let deleteStatus;
+    let deleteBody;
+    await routes.get("/tracks/:id")(
+      { params: { id: "703" }, user: { role: "user", permissions: {} } },
+      {
+        status(code) {
+          deleteStatus = code;
+          return this;
+        },
+        json(value) {
+          deleteBody = value;
+          return this;
+        },
+      },
+    );
+    assert.equal(deleteStatus, 403);
+    assert.equal(deleteBody.message, "Permission required: deleteTrack or deleteAlbum");
 
     let body;
     await routes.get("/tracks")(
@@ -81,8 +109,8 @@ test("canonical track reads remove nested filesystem paths", async () => {
     assert.equal(body.length, 1);
     assert.equal("path" in body[0], false);
     assert.deepEqual(body[0].quality, { audioFormat: "FLAC", nested: {} });
-    assert.equal(body[0].streamPath, null);
-    assert.equal(body[0].streamFormat, null);
+    assert.match(body[0].streamPath, /\/library\/canonical-stream\/\d+$/);
+    assert.equal(body[0].streamFormat, "flac");
   } finally {
     const track = db.prepare(
       "SELECT track_id AS trackId FROM library_media_files WHERE source = ? AND path = ?",

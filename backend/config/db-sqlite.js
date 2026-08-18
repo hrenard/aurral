@@ -76,6 +76,48 @@ db.exec(`
     FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
   );
 
+  CREATE TABLE IF NOT EXISTS lastfm_link_states (
+    token_hash TEXT PRIMARY KEY,
+    user_id INTEGER NOT NULL,
+    browser_nonce_hash TEXT NOT NULL,
+    expires_at INTEGER NOT NULL,
+    consumed_at INTEGER,
+    created_at INTEGER NOT NULL,
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_lastfm_link_states_expiry
+    ON lastfm_link_states(expires_at);
+
+  CREATE TABLE IF NOT EXISTS subsonic_stars (
+    user_id INTEGER NOT NULL,
+    entity_kind TEXT NOT NULL,
+    entity_key TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    PRIMARY KEY (user_id, entity_kind, entity_key),
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+  );
+
+  CREATE TABLE IF NOT EXISTS play_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    track_id TEXT NOT NULL,
+    title TEXT NOT NULL,
+    artist TEXT NOT NULL,
+    album TEXT,
+    artist_mbid TEXT,
+    album_mbid TEXT,
+    track_mbid TEXT,
+    duration_ms INTEGER,
+    played_at INTEGER NOT NULL,
+    source TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_play_events_user_played_at
+    ON play_events(user_id, played_at DESC);
+
   CREATE TABLE IF NOT EXISTS playlist_download_jobs (
     id TEXT PRIMARY KEY,
     artist_name TEXT NOT NULL,
@@ -197,6 +239,7 @@ db.exec(`
   CREATE TABLE IF NOT EXISTS library_media_files (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     track_id INTEGER NOT NULL,
+    album_id INTEGER,
     source TEXT NOT NULL,
     path TEXT NOT NULL,
     format TEXT,
@@ -229,10 +272,20 @@ db.exec(`
     ON lidarr_artist_id_map (lidarr_foreign_artist_id);
   CREATE INDEX IF NOT EXISTS idx_library_albums_artist_id
     ON library_albums (artist_id);
+  CREATE INDEX IF NOT EXISTS idx_library_albums_title
+    ON library_albums (title COLLATE NOCASE);
+  CREATE INDEX IF NOT EXISTS idx_library_albums_release_date
+    ON library_albums (release_date DESC);
+  CREATE INDEX IF NOT EXISTS idx_library_artists_sort_name_name
+    ON library_artists (sort_name COLLATE NOCASE, name COLLATE NOCASE);
   CREATE INDEX IF NOT EXISTS idx_library_album_tracks_track_id
     ON library_album_tracks (track_id);
+  CREATE INDEX IF NOT EXISTS idx_library_tracks_title
+    ON library_tracks (title COLLATE NOCASE);
   CREATE INDEX IF NOT EXISTS idx_library_media_files_track_id
     ON library_media_files (track_id);
+  CREATE INDEX IF NOT EXISTS idx_library_media_files_track_source_available
+    ON library_media_files (track_id, source, available);
   CREATE INDEX IF NOT EXISTS idx_library_media_files_source_available
     ON library_media_files (source, available);
   CREATE INDEX IF NOT EXISTS idx_library_media_files_scan_id
@@ -318,6 +371,8 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_sessions_token ON sessions(token);
   CREATE INDEX IF NOT EXISTS idx_sessions_user_id ON sessions(user_id);
   CREATE INDEX IF NOT EXISTS idx_sessions_expires_at ON sessions(expires_at);
+  CREATE INDEX IF NOT EXISTS idx_subsonic_stars_user_created
+    ON subsonic_stars (user_id, created_at);
   CREATE INDEX IF NOT EXISTS idx_aurral_history_created_at ON aurral_history(created_at DESC);
   CREATE INDEX IF NOT EXISTS idx_inbox_items_user_state ON inbox_items(user_id, is_dismissed, is_read, created_at DESC);
   CREATE INDEX IF NOT EXISTS idx_inbox_items_expiry ON inbox_items(expires_at, created_at DESC);
@@ -329,6 +384,8 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_honker_task_runs_queue_started ON honker_task_runs(queue, started_at DESC);
   CREATE INDEX IF NOT EXISTS idx_honker_task_runs_job ON honker_task_runs(job_id, queue);
 `);
+
+tryAddColumn("ALTER TABLE library_media_files ADD COLUMN album_id INTEGER");
 
 function hasUniqueIndex(columns) {
   return db.prepare("PRAGMA index_list(library_media_files)").all().some((index) => {
@@ -348,6 +405,7 @@ if (hasUniqueIndex(["path"])) {
       CREATE TABLE library_media_files_v3 (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         track_id INTEGER NOT NULL,
+        album_id INTEGER,
         source TEXT NOT NULL,
         path TEXT NOT NULL,
         format TEXT,
@@ -364,9 +422,9 @@ if (hasUniqueIndex(["path"])) {
       );
 
       INSERT INTO library_media_files_v3
-        (id, track_id, source, path, format, size, mtime_ms, duration_ms, quality_json,
+        (id, track_id, album_id, source, path, format, size, mtime_ms, duration_ms, quality_json,
          available, last_seen_scan_id, created_at, updated_at)
-      SELECT id, track_id, source, path, format, size, mtime_ms, duration_ms, quality_json,
+      SELECT id, track_id, album_id, source, path, format, size, mtime_ms, duration_ms, quality_json,
         available, last_seen_scan_id, created_at, updated_at
       FROM library_media_files;
 
@@ -378,12 +436,19 @@ if (hasUniqueIndex(["path"])) {
   db.exec(`
     CREATE INDEX IF NOT EXISTS idx_library_media_files_track_id
       ON library_media_files (track_id);
+    CREATE INDEX IF NOT EXISTS idx_library_media_files_track_source_available
+      ON library_media_files (track_id, source, available);
     CREATE INDEX IF NOT EXISTS idx_library_media_files_source_available
       ON library_media_files (source, available);
     CREATE INDEX IF NOT EXISTS idx_library_media_files_scan_id
       ON library_media_files (last_seen_scan_id);
   `);
 }
+
+db.exec(`
+  CREATE INDEX IF NOT EXISTS idx_library_media_files_album_source_available
+    ON library_media_files (album_id, source, available);
+`);
 
 const duplicateLidarrArtistIds = db
   .prepare(

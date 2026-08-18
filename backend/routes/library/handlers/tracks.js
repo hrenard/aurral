@@ -1,27 +1,21 @@
 import { libraryManager } from "../../../services/libraryManager.js";
 import { cacheMiddleware } from "../../../middleware/cache.js";
 import { noCache } from "../../../middleware/cache.js";
-import { verifyTokenAuth } from "../../../middleware/auth.js";
+import { hasPermission, verifyTokenAuth } from "../../../middleware/auth.js";
+import { requireAuth } from "../../../middleware/requirePermission.js";
 import { getAlbumTracksByAlbumMbid } from "../../../services/providers/brainzmashProvider.js";
 import { enrichTracksWithDeezerPreviews } from "../../../services/apiClients/index.js";
-import fs from "fs";
 import fsp from "fs/promises";
 import path from "path";
 import { logger } from "../../../services/logger.js";
 import {
+  buildCanonicalLibraryReadModel,
   findCanonicalTracksForAlbum,
-  getCanonicalLibraryReadModel,
+  resolveCanonicalTrackPath,
 } from "../../../services/canonicalLibraryReadAdapter.js";
+import { getCanonicalLibrary } from "../../../services/libraryQueryService.js";
 import { stripFilesystemPaths } from "./canonical.js";
-
-const AUDIO_CONTENT_TYPES = {
-  ".mp3": "audio/mpeg",
-  ".m4a": "audio/mp4",
-  ".aac": "audio/aac",
-  ".flac": "audio/flac",
-  ".ogg": "audio/ogg",
-  ".wav": "audio/wav",
-};
+import { streamAudioFile } from "../../../services/audioFileStream.js";
 
 const canReadAudioFile = async (filePath) => {
   if (!filePath) return false;
@@ -33,48 +27,54 @@ const canReadAudioFile = async (filePath) => {
   }
 };
 
-const streamAudioFile = async (req, res, filePath) => {
-  let stat;
-  try {
-    stat = await fsp.stat(filePath);
-    if (!stat.isFile()) {
-      return res.status(404).json({ error: "Track file missing" });
-    }
-  } catch {
-    return res.status(404).json({ error: "Track file missing" });
+const requireTrackDeletion = (req, res, next) => {
+  if (hasPermission(req.user, "deleteTrack") || hasPermission(req.user, "deleteAlbum")) {
+    return next();
   }
-
-  const ext = path.extname(filePath).toLowerCase();
-  res.setHeader("Content-Type", AUDIO_CONTENT_TYPES[ext] || "application/octet-stream");
-  res.setHeader("Accept-Ranges", "bytes");
-
-  const range = req.headers.range;
-  if (!range) {
-    res.setHeader("Content-Length", stat.size);
-    fs.createReadStream(filePath).pipe(res);
-    return;
-  }
-
-  const match = /bytes=(\d*)-(\d*)/.exec(range);
-  if (!match) {
-    res.status(416).end();
-    return;
-  }
-  const rawStart = match[1] ? Number(match[1]) : 0;
-  const rawEnd = match[2] ? Number(match[2]) : stat.size - 1;
-  const start = Number.isFinite(rawStart) ? rawStart : 0;
-  const end = Number.isFinite(rawEnd) ? rawEnd : stat.size - 1;
-  if (start < 0 || end < start || end >= stat.size) {
-    res.status(416).end();
-    return;
-  }
-  res.status(206);
-  res.setHeader("Content-Range", `bytes ${start}-${end}/${stat.size}`);
-  res.setHeader("Content-Length", end - start + 1);
-  fs.createReadStream(filePath, { start, end }).pipe(res);
+  return res.status(403).json({
+    error: "Forbidden",
+    message: "Permission required: deleteTrack or deleteAlbum",
+  });
 };
 
 export function registerTracks(router) {
+  router.delete(
+    "/tracks/:id",
+    requireAuth,
+    requireTrackDeletion,
+    async (req, res) => {
+      try {
+        const result = await libraryManager.deleteTrack(req.params.id);
+        if (!result?.success) {
+          if (result?.code === "not_found") {
+            return res.status(404).json({
+              error: "Track not found",
+              message: "The track or its file no longer exists.",
+            });
+          }
+          if (result?.code === "lidarr_unavailable") {
+            return res.status(503).json({
+              error: "Lidarr unavailable",
+              message: "Lidarr is not available. Try again later.",
+            });
+          }
+          logger.error("library", `Track deletion failed: ${String(result?.error || "Unknown error")}`);
+          return res.status(500).json({
+            error: "Failed to delete track",
+            message: "Failed to delete track",
+          });
+        }
+        return res.json({ success: true, message: "Track deleted successfully" });
+      } catch (error) {
+        logger.error("library", `Track deletion threw: ${error.message}`);
+        return res.status(500).json({
+          error: "Failed to delete track",
+          message: "Failed to delete track",
+        });
+      }
+    },
+  );
+
   router.get("/playback-queue", cacheMiddleware(120), async (req, res) => {
     try {
       const tracks = await libraryManager.getPlaybackQueue();
@@ -92,9 +92,11 @@ export function registerTracks(router) {
       const { albumId, releaseGroupMbid } = req.query;
 
       if (req.query.readPath === "canonical") {
-        const { albums, tracks } = getCanonicalLibraryReadModel({
-          source: req.query.source || "lidarr",
+        const canonicalLibrary = getCanonicalLibrary({
+          source: req.query.source || "all",
+          availableOnly: true,
         });
+        const { albums, tracks } = buildCanonicalLibraryReadModel(canonicalLibrary);
         const album = [albumId, releaseGroupMbid]
           .filter(Boolean)
           .map((reference) =>
@@ -108,8 +110,9 @@ export function registerTracks(router) {
         const canonicalTracks = album
           ? findCanonicalTracksForAlbum(tracks, album.id).map((track) => ({
               ...stripFilesystemPaths(track),
-              streamPath: null,
-              streamFormat: null,
+              streamPath: track.hasFile
+                ? `/library/canonical-stream/${encodeURIComponent(track.id)}`
+                : null,
             }))
           : [];
         return res.json(canonicalTracks);
@@ -222,6 +225,25 @@ export function registerTracks(router) {
     }
   });
 
+  router.get("/canonical-stream/:trackId", noCache, async (req, res) => {
+    if (!verifyTokenAuth(req)) {
+      return res.status(401).json({ error: "Unauthorized" });
+    }
+
+    const filePath = resolveCanonicalTrackPath(req.params.trackId);
+    if (!filePath) return res.status(404).json({ error: "Track file missing" });
+    try {
+      if (!(await streamAudioFile(req, res, filePath)) && !res.headersSent) {
+        return res.status(404).json({ error: "Track file missing" });
+      }
+    } catch (error) {
+      if (!res.headersSent) {
+        return res.status(500).json({ error: "Stream failed", message: error.message });
+      }
+    }
+    return undefined;
+  });
+
   router.get("/file-stream/:albumId/:trackId", noCache, async (req, res) => {
     if (!verifyTokenAuth(req)) {
       return res.status(401).json({ error: "Unauthorized" });
@@ -233,7 +255,9 @@ export function registerTracks(router) {
       if (!track?.hasFile || !track.path) {
         return res.status(404).json({ error: "Track file missing" });
       }
-      return streamAudioFile(req, res, track.path);
+      if (!(await streamAudioFile(req, res, track.path))) {
+        if (!res.headersSent) return res.status(404).json({ error: "Track file missing" });
+      }
     } catch (error) {
       if (!res.headersSent) {
         res.status(500).json({

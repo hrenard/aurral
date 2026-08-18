@@ -5,7 +5,15 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 
 import { db } from "../../backend/config/db-sqlite.js";
-import { getLibrarySnapshot } from "../../backend/services/libraryMediaStore.js";
+import { getCanonicalLibraryPage } from "../../backend/services/libraryQueryService.js";
+import {
+  getLibrarySnapshot,
+  linkLibraryAlbumTrack,
+  upsertLibraryAlbum,
+  upsertLibraryArtist,
+  upsertLibraryMediaFile,
+  upsertLibraryTrack,
+} from "../../backend/services/libraryMediaStore.js";
 import { scanMusicRoot } from "../../backend/services/libraryFileScanner.js";
 import { indexLidarrLibrary } from "../../backend/services/libraryLidarrIndexer.js";
 import { scanConfiguredLibrary } from "../../backend/services/libraryIndexService.js";
@@ -246,6 +254,130 @@ test("indexLidarrLibrary imports logical media and readable track files", async 
   }
 });
 
+test("indexLidarrLibrary does not reuse a file from another album", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "aurral-lidarr-album-scope-"));
+  const artistId = 10000 + (process.pid % 1000);
+  const firstAlbumId = artistId + 1;
+  const secondAlbumId = artistId + 2;
+  const filePath = await createAudioFile(root, "Artist/Eve 6/01 Showerhead.flac");
+  const artistMbid = "11111111-1111-4111-8111-111111111111";
+  const firstAlbumMbid = "22222222-2222-4222-8222-222222222222";
+  const secondAlbumMbid = "33333333-3333-4333-8333-333333333333";
+  const recordingMbid = "44444444-4444-4444-8444-444444444444";
+  const trackFileId = artistId + 10;
+  const aurralPath = path.join(root, "Aurral/Eve 6/01 Showerhead.flac");
+  try {
+    const artist = upsertLibraryArtist({
+      identityKey: `mbid:${artistMbid}`,
+      mbid: artistMbid,
+      name: "Eve 6",
+    });
+    const album = upsertLibraryAlbum({
+      identityKey: `release-group:${secondAlbumMbid}`,
+      mbid: secondAlbumMbid,
+      releaseGroupMbid: secondAlbumMbid,
+      artistId: artist.id,
+      title: "Inside Out",
+    });
+    const track = upsertLibraryTrack({
+      identityKey: `recording:${recordingMbid}`,
+      mbid: recordingMbid,
+      title: "Showerhead",
+      artistName: "Eve 6",
+    });
+    linkLibraryAlbumTrack({ albumId: album.id, trackId: track.id, trackNumber: 1 });
+    upsertLibraryMediaFile({
+      trackId: track.id,
+      albumId: album.id,
+      source: "aurral",
+      path: aurralPath,
+    });
+
+    await indexLidarrLibrary({
+      client: {
+        isConfigured: () => true,
+        request: async () => [{
+          id: artistId,
+          artistName: "Eve 6",
+          foreignArtistId: artistMbid,
+          path: path.join(root, "Artist"),
+        }],
+        getAllAlbums: async () => [
+          {
+            id: firstAlbumId,
+            artistId,
+            title: "Eve 6",
+            foreignAlbumId: firstAlbumMbid,
+            statistics: { sizeOnDisk: 1 },
+          },
+          {
+            id: secondAlbumId,
+            artistId,
+            title: "Inside Out",
+            foreignAlbumId: secondAlbumMbid,
+            statistics: { sizeOnDisk: 0 },
+          },
+        ],
+        getTracksByAlbumId: async (albumId) => [{
+          id: albumId + 100,
+          albumId,
+          title: "Showerhead",
+          trackNumber: 1,
+          foreignRecordingId: recordingMbid,
+          trackFileId,
+        }],
+        getTrackFilesByAlbumId: async (albumId) => albumId === firstAlbumId
+          ? [{ id: trackFileId, albumId: firstAlbumId, path: filePath }]
+          : [],
+        getRootFolders: async () => [{ path: root }],
+      },
+    });
+
+    const albumRows = db.prepare(
+      `SELECT album.title AS title, COUNT(DISTINCT media.id) AS files
+       FROM library_albums AS album
+       JOIN library_album_tracks AS album_track ON album_track.album_id = album.id
+       LEFT JOIN library_media_files AS media
+         ON media.track_id = album_track.track_id
+        AND media.album_id = album_track.album_id
+        AND media.source = 'lidarr'
+        AND media.available = 1
+       WHERE album.identity_key IN (?, ?)
+       GROUP BY album.id
+       ORDER BY album.title`,
+    ).all(`release-group:${firstAlbumMbid}`, `release-group:${secondAlbumMbid}`);
+    assert.deepEqual(albumRows, [
+      { title: "Eve 6", files: 1 },
+      { title: "Inside Out", files: 0 },
+    ]);
+    const lidarrPage = getCanonicalLibraryPage({
+      source: "lidarr",
+      kind: "albums",
+      page: 1,
+      pageSize: 10,
+    });
+    assert.deepEqual(lidarrPage.items.map((item) => item.title), ["Eve 6"]);
+  } finally {
+    db.prepare("DELETE FROM library_media_files WHERE source = 'lidarr' AND path = ?").run(filePath);
+    db.prepare("DELETE FROM library_media_files WHERE source = 'aurral' AND path = ?").run(aurralPath);
+    const albumRows = db.prepare(
+      "SELECT id FROM library_albums WHERE identity_key IN (?, ?)",
+    ).all(`release-group:${firstAlbumMbid}`, `release-group:${secondAlbumMbid}`);
+    const albumIds = albumRows.map((row) => row.id);
+    if (albumIds.length) {
+      db.prepare(
+        `DELETE FROM library_album_tracks WHERE album_id IN (${albumIds.map(() => "?").join(",")})`,
+      ).run(...albumIds);
+      db.prepare(
+        `DELETE FROM library_albums WHERE id IN (${albumIds.map(() => "?").join(",")})`,
+      ).run(...albumIds);
+    }
+    db.prepare("DELETE FROM library_tracks WHERE identity_key = ?").run(`recording:${recordingMbid}`);
+    db.prepare("DELETE FROM library_artists WHERE identity_key = ?").run(`mbid:${artistMbid}`);
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("a partial Lidarr rescan preserves existing file availability", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "aurral-lidarr-partial-"));
   let filePath;
@@ -336,6 +468,41 @@ test("a Lidarr outage leaves the last indexed library available", async () => {
     const file = getLibrarySnapshot().files.find((entry) => entry.path === filePath);
 
     assert.equal(result.lidarr.error, "Lidarr unavailable");
+    assert.equal(file?.available, 1);
+  } finally {
+    if (filePath) deleteIndexedFile("lidarr", filePath);
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("an empty Lidarr response leaves the last indexed library available", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "aurral-lidarr-empty-"));
+  let filePath;
+  try {
+    filePath = await createAudioFile(root, "Empty Artist/Empty Album/01 Empty Track.flac");
+    const indexedClient = {
+      isConfigured: () => true,
+      request: async () => [{ id: 37, artistName: "Empty Artist", foreignArtistId: "dddddddd-dddd-4ddd-8ddd-dddddddddddd" }],
+      getAllAlbums: async () => [{ id: 38, artistId: 37, title: "Empty Album", foreignAlbumId: "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee" }],
+      getTracksByAlbumId: async () => [{ id: 39, albumId: 38, title: "Empty Track", trackNumber: 1, foreignRecordingId: "ffffffff-ffff-4fff-8fff-ffffffffffff", trackFileId: 40 }],
+      getTrackFilesByAlbumId: async () => [{ id: 40, path: filePath, trackIds: [39] }],
+      getRootFolders: async () => [{ path: root }],
+    };
+
+    await indexLidarrLibrary({ client: indexedClient });
+    const result = await indexLidarrLibrary({
+      client: {
+        isConfigured: () => true,
+        request: async () => [{ id: 37, artistName: "Empty Artist", foreignArtistId: "dddddddd-dddd-4ddd-8ddd-dddddddddddd" }],
+        getAllAlbums: async () => [{ id: 38, artistId: 37, title: "Empty Album", foreignAlbumId: "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee" }],
+        getTracksByAlbumId: async () => [],
+        getTrackFilesByAlbumId: async () => [],
+        getRootFolders: async () => [{ path: root }],
+      },
+    });
+    const file = getLibrarySnapshot().files.find((entry) => entry.path === filePath);
+
+    assert.equal(result.filesIndexed, 0);
     assert.equal(file?.available, 1);
   } finally {
     if (filePath) deleteIndexedFile("lidarr", filePath);

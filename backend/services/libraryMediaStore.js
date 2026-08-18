@@ -1,4 +1,5 @@
 import { db, dbHelpers } from "../config/db-sqlite.js";
+import { invalidateCanonicalLibraryCache } from "./libraryQueryService.js";
 
 const now = () => Date.now();
 
@@ -13,6 +14,17 @@ const normalizeKeyPart = (value) =>
     .replace(/[\u0300-\u036f]/g, "")
     .replace(/[^a-z0-9]+/g, " ")
     .trim();
+
+let libraryScanDepth = 0;
+let libraryCacheInvalidationPending = false;
+
+const invalidateLibraryCache = () => {
+  if (libraryScanDepth > 0) {
+    libraryCacheInvalidationPending = true;
+    return;
+  }
+  invalidateCanonicalLibraryCache();
+};
 
 export function buildIdentityKey(prefix, value) {
   const normalized = normalizeText(value);
@@ -73,6 +85,7 @@ export function upsertLibraryArtist({ identityKey, mbid = null, name, sortName =
        metadata_json = COALESCE(excluded.metadata_json, library_artists.metadata_json),
        updated_at = excluded.updated_at`,
   ).run(key, mbid || null, artistName, sortName || null, stringify(metadata), timestamp, timestamp);
+  invalidateLibraryCache();
   return db.prepare("SELECT * FROM library_artists WHERE identity_key = ?").get(key);
 }
 
@@ -117,6 +130,7 @@ export function upsertLibraryAlbum({
     timestamp,
     timestamp,
   );
+  invalidateLibraryCache();
   return db.prepare("SELECT * FROM library_albums WHERE identity_key = ?").get(key);
 }
 
@@ -141,6 +155,7 @@ export function upsertLibraryTrack({
        metadata_json = COALESCE(excluded.metadata_json, library_tracks.metadata_json),
        updated_at = excluded.updated_at`,
   ).run(key, mbid || null, trackTitle, artistName || null, stringify(metadata), timestamp, timestamp);
+  invalidateLibraryCache();
   return db.prepare("SELECT * FROM library_tracks WHERE identity_key = ?").get(key);
 }
 
@@ -150,10 +165,37 @@ export function linkLibraryAlbumTrack({ albumId, trackId, discNumber = 1, trackN
       (album_id, track_id, disc_number, track_number, created_at)
      VALUES (?, ?, ?, ?, ?)`,
   ).run(Number(albumId), Number(trackId), Number(discNumber) || 1, Number(trackNumber) || 0, now());
+  invalidateLibraryCache();
+}
+
+export function removeLibraryAlbumTracksWithoutMedia(albumId, source) {
+  const mediaSource = normalizeText(source);
+  db.prepare(
+    `DELETE FROM library_album_tracks
+     WHERE album_id = ?
+       AND NOT EXISTS (
+         SELECT 1
+         FROM library_media_files AS media
+         WHERE media.track_id = library_album_tracks.track_id
+           AND media.album_id = library_album_tracks.album_id
+           AND media.source = ?
+           AND media.available = 1
+       )
+       AND NOT EXISTS (
+         SELECT 1
+         FROM library_media_files AS media
+         WHERE media.track_id = library_album_tracks.track_id
+           AND media.album_id = library_album_tracks.album_id
+           AND media.source != ?
+           AND media.available = 1
+       )`,
+  ).run(Number(albumId), mediaSource, mediaSource);
+  invalidateLibraryCache();
 }
 
 export function upsertLibraryMediaFile({
   trackId,
+  albumId = null,
   source,
   path,
   format = null,
@@ -169,13 +211,17 @@ export function upsertLibraryMediaFile({
   if (!Number.isSafeInteger(Number(trackId)) || !fileSource || !filePath) {
     throw new Error("Library media file trackId, source, and path are required");
   }
+  const normalizedAlbumId = Number.isSafeInteger(Number(albumId)) && Number(albumId) > 0
+    ? Number(albumId)
+    : null;
   const timestamp = now();
   db.prepare(
     `INSERT INTO library_media_files
-      (track_id, source, path, format, size, mtime_ms, duration_ms, quality_json, available, last_seen_scan_id, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      (track_id, album_id, source, path, format, size, mtime_ms, duration_ms, quality_json, available, last_seen_scan_id, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
      ON CONFLICT(source, path) DO UPDATE SET
        track_id = excluded.track_id,
+       album_id = COALESCE(excluded.album_id, library_media_files.album_id),
        source = excluded.source,
        format = excluded.format,
        size = excluded.size,
@@ -187,6 +233,7 @@ export function upsertLibraryMediaFile({
        updated_at = excluded.updated_at`,
   ).run(
     Number(trackId),
+    normalizedAlbumId,
     fileSource,
     filePath,
     format || null,
@@ -199,6 +246,7 @@ export function upsertLibraryMediaFile({
     timestamp,
     timestamp,
   );
+  invalidateLibraryCache();
 }
 
 export function markUnseenFilesUnavailable(scanId, source) {
@@ -207,9 +255,11 @@ export function markUnseenFilesUnavailable(scanId, source) {
      SET available = 0, updated_at = ?
      WHERE source = ? AND (last_seen_scan_id IS NULL OR last_seen_scan_id != ?)`,
   ).run(now(), normalizeText(source), Number(scanId));
+  invalidateLibraryCache();
 }
 
 export async function withLibraryScan(source, rootPath, run) {
+  libraryScanDepth += 1;
   const scanId = beginLibraryScan({ source, rootPath });
   try {
     const result = await run(scanId);
@@ -218,6 +268,12 @@ export async function withLibraryScan(source, rootPath, run) {
   } catch (error) {
     finishLibraryScan(scanId, { status: "failed", error: error.message });
     throw error;
+  } finally {
+    libraryScanDepth -= 1;
+    if (libraryScanDepth === 0 && libraryCacheInvalidationPending) {
+      libraryCacheInvalidationPending = false;
+      invalidateCanonicalLibraryCache();
+    }
   }
 }
 
@@ -229,4 +285,15 @@ export function getLibrarySnapshot() {
     albumTracks: db.prepare("SELECT * FROM library_album_tracks").all(),
     files: db.prepare("SELECT * FROM library_media_files ORDER BY path").all(),
   };
+}
+
+export function getLibraryMediaFile({ source, path }) {
+  return db
+    .prepare(
+      `SELECT *
+       FROM library_media_files
+       WHERE source = ? AND path = ?
+       LIMIT 1`,
+    )
+    .get(normalizeText(source), normalizeText(path));
 }

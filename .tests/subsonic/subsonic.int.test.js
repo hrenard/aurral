@@ -45,7 +45,7 @@ test.before(async () => {
   resetDatabase(db);
   dbOps.updateSettings({ integrations: {}, onboardingComplete: true });
   userOps.createUser("alice", hashPassword("password123"), "user");
-  aurral = await startServerProcess();
+  aurral = await startServerProcess({ extraEnv: { CORS_ORIGIN: "" } });
 });
 
 test.after(async () => {
@@ -75,6 +75,31 @@ test("authenticates an Aurral user and returns JSON or XML envelopes", async () 
   assert.match(xml.body, /xmlns="http:\/\/subsonic\.org\/restapi"/);
 });
 
+test("allows browser Subsonic clients without CORS configuration", async () => {
+  const response = await fetch(subsonicUrl("ping", { f: "json" }), {
+    headers: { Origin: "http://feishin.example" },
+  });
+  assert.equal(response.headers.get("access-control-allow-origin"), "*");
+
+  const preflight = await fetch(subsonicUrl("ping", { f: "json" }), {
+    method: "OPTIONS",
+    headers: {
+      Origin: "http://feishin.example",
+      "Access-Control-Request-Method": "GET",
+    },
+  });
+  assert.equal(preflight.status, 204);
+  assert.equal(preflight.headers.get("access-control-allow-origin"), "*");
+});
+
+test("allows browser clients to read redirected artwork without CORS configuration", async () => {
+  const response = await fetch(`http://127.0.0.1:${aurral.port}/api/image-proxy/missing-cache-key.webp`, {
+    headers: { Origin: "http://feishin.example" },
+  });
+  assert.equal(response.headers.get("access-control-allow-origin"), "*");
+  assert.equal(response.headers.get("cross-origin-resource-policy"), "cross-origin");
+});
+
 test("returns the Subsonic invalid-credentials error", async () => {
   const result = await request("ping", { p: "wrong-password", f: "json" });
   assert.equal(result.response.status, 200);
@@ -89,10 +114,10 @@ test("returns protocol errors for unsupported authentication and requests", asyn
   const token = await request("ping", { p: "", t: "token", s: "salt", f: "json" });
   assert.equal(token.json.error.code, 41);
 
-  const unsupported = await request("getArtists", { f: "json" });
+  const unsupported = await request("getVideos", { f: "json" });
   assert.deepEqual(unsupported.json.error, {
     code: 0,
-    message: "Unsupported request: getartists",
+    message: "Unsupported request: getvideos",
   });
 
   const unsupportedFormat = await request("ping", { f: "jsonp" });

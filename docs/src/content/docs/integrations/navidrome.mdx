@@ -3,11 +3,39 @@ title: Navidrome
 description: Connect Navidrome to play Aurral downloads and generated playlists.
 ---
 
-Navidrome is optional. Aurral creates and updates Navidrome playlists through the Subsonic API. Navidrome must also be able to read and scan the Aurral download tree.
+Navidrome is optional. Aurral can browse and play indexed media in the app without Navidrome when the canonical file is readable. Aurral
+also creates and updates Navidrome playlists through the Subsonic API when Navidrome is configured.
+Navidrome must be able to read and scan the Aurral download tree for that destination.
 
 This is a filesystem connection as well as an API connection. A successful **Test connection** only proves that Aurral can reach the Navidrome API.
 
-Aurral also exposes an authenticated Subsonic handshake at `/rest/ping.view`. It supports XML and JSON responses and identifies the running server version. Browsing, artwork, streaming, playlists, and transcoding are not available through this endpoint yet. Navidrome remains the playback server.
+Aurral also exposes an authenticated Subsonic server at `/rest/*.view`. It supports XML and JSON browsing, canonical artist/album/song search, artwork, direct streaming with byte ranges, and user-scoped favorites through `getStarred`, `star`, and `unstar`. Completed flow entries and accessible shared-playlist entries are exposed as read-only playlist items through `getPlaylists` and `getPlaylist`; the endpoint does not create or update playlists, transcode audio, or write to the canonical library. Navidrome remains optional for clients that connect directly to Aurral.
+
+## Connect a Subsonic client
+
+Point the client at the Aurral URL and use the Aurral account from onboarding. Aurral enables browser Subsonic clients on `/rest` without an additional CORS setting. Feishin can connect with its default token authentication when you use that configured account. Feishin can also use password authentication when you set `LEGACY_AUTHENTICATION=true` in Feishin's environment, not Aurral's. When Feishin locks server settings, also set `SERVER_LOCK=true` in Feishin's environment.
+
+Use the Aurral URL as the Feishin server URL. Set the server type to `Subsonic`. Feishin then shows canonical tracks, flow playlists, and shared playlists that the account can access. A playlist entry remains playable while its canonical file is readable.
+
+The native Subsonic responses include playlist artwork through `getPlaylists`, `getPlaylist`, and `getCoverArt`. They also expose genres from canonical artist, album, and track metadata through artist, album, song, and `getGenres` responses. The native path does not fetch metadata from a provider while browsing.
+
+## Submit play history
+
+Aurral reports `scrobble.view` submissions from Subsonic clients as local play events. The endpoint accepts repeated `id` and `time` parameters and follows the Subsonic `submission` flag. A successful submission records local history before Aurral delivers the play to any configured scrobbling provider.
+
+Aurral exposes `scrobblingEnabled=true` from `getuser.view`. This reports that the server supports the scrobble endpoint. It does not require a provider connection.
+
+The built-in Aurral player records completed library tracks through the same local play-event path. Aurral keeps local history when Last.fm, ListenBrainz, or Koito is unavailable.
+
+## Navidrome-compatible scrobbling
+
+Open **Settings > Playback > Scrobbling** to connect Last.fm or ListenBrainz. Aurral copies
+Navidrome's provider flows directly, so a Navidrome connection is not required for scrobbling.
+
+Aurral uses the Last.fm API key and API secret from **Settings > Connect > Last.fm**. It validates
+ListenBrainz tokens directly. Completed plays are submitted from Aurral to the selected provider.
+
+Navidrome remains an independent playback and playlist destination.
 
 See [Filesystem and mounts](/getting-started/storage/) for the complete layout. The recommended Docker setup mounts the same host media root at `/data` in Aurral and Navidrome:
 

@@ -8,6 +8,7 @@ import {
 import { startSystemTaskWorker } from "./systemTaskWorker.js";
 import { startLibraryScanWorker } from "./libraryScanWorker.js";
 import { startNotificationOutboxWorker } from "./notificationOutboxWorker.js";
+import { startPlayEventOutboxWorker } from "./playEventOutboxWorker.js";
 import { startSlskdOrchestratorWorker } from "./slskdOrchestratorWorker.js";
 import { startDiscoveryRefreshWorker } from "./discoveryRefreshWorker.js";
 import { startDiscoveryPlaylistBuildWorker } from "./discoveryPlaylistBuildWorker.js";
@@ -16,6 +17,10 @@ import { startWeeklyFlowOperationWorker } from "./weeklyFlow/weeklyFlowOperation
 import { startWeeklyFlowPlaylistRetryWorker } from "./weeklyFlow/weeklyFlowPlaylistRetryWorker.js";
 import { startWeeklyFlowPlaylistReserveBuildWorker } from "./weeklyFlow/weeklyFlowPlaylistReserveBuildWorker.js";
 import { startPlaylistMbidEnrichmentWorker } from "./playlistMbidEnrichmentWorker.js";
+import {
+  startLibraryFileWatcher,
+  stopLibraryFileWatcher,
+} from "./libraryFileWatcher.js";
 import { registerHonkerShutdownHandler } from "./honkerWorkerRuntime.js";
 import { HONKER_QUEUE_NAMES } from "./honkerDb.js";
 
@@ -33,6 +38,7 @@ const WORKER_STARTS = {
   "system-task": startSystemTaskWorker,
   "library-scan": startLibraryScanWorker,
   "_outbox:notifications": startNotificationOutboxWorker,
+  "_outbox:play-events": startPlayEventOutboxWorker,
   "slskd-pipeline": startSlskdOrchestratorWorker,
   "discovery-refresh": startDiscoveryRefreshWorker,
   "discovery-playlist-build": startDiscoveryPlaylistBuildWorker,
@@ -117,6 +123,7 @@ function stopWorkerSupervisor() {
 
 registerHonkerShutdownHandler(() => {
   stopWorkerSupervisor();
+  stopLibraryFileWatcher();
 });
 
 export function startBackgroundWorkers({ logger = console } = {}) {
@@ -148,6 +155,12 @@ export function startBackgroundWorkers({ logger = console } = {}) {
     });
   enqueueHonkerStartupTasks();
   startWorkerSupervisor();
+  void startLibraryFileWatcher({ logger }).catch((error) => {
+    logger.warn?.(
+      "[AppRuntime] Failed to start library file watcher:",
+      error?.message || error,
+    );
+  });
   return true;
 }
 

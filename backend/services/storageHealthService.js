@@ -2,6 +2,7 @@ import { randomUUID } from "crypto";
 import fs from "fs/promises";
 import path from "path";
 import { dbOps } from "../db/helpers/index.js";
+import { getCanonicalLibrary } from "./libraryQueryService.js";
 import { lidarrClient } from "./lidarrClient.js";
 import { slskdClient } from "./slskdClient.js";
 import { nzbgetClient } from "./nzbgetClient.js";
@@ -18,10 +19,6 @@ import {
 import { downloadTracker } from "./weeklyFlow/weeklyFlowDownloadTracker.js";
 import { commitImportToPlaylistLibrary } from "./playlistDownloadUtils.js";
 import {
-  remapLegacyPath as remapLegacyWeeklyFlowPath,
-  resolvePlaylistRoot as resolveWeeklyFlowRoot,
-} from "./playlistPaths.js";
-import {
   getFilesystemBrowseRoots,
   resolveEnvDownloadFolder,
   getSuggestedDownloadFolderPath,
@@ -33,11 +30,10 @@ const STORAGE_HEALTH_CACHE_TTL_MS = Math.max(
   0,
   Math.floor(Number(process.env.AURRAL_STORAGE_HEALTH_CACHE_MS) || 60 * 1000),
 );
-const PLAYLIST_FILE_HEALTH_SAMPLE_LIMIT = Math.max(
+const MEDIA_HEALTH_SAMPLE_LIMIT = Math.max(
   50,
-  Math.floor(Number(process.env.AURRAL_PLAYLIST_FILE_HEALTH_SAMPLE_LIMIT) || 500),
+  Math.floor(Number(process.env.AURRAL_MEDIA_HEALTH_SAMPLE_LIMIT) || 500),
 );
-
 let storageHealthCache = null;
 let storageHealthCacheExpiresAt = 0;
 let storageHealthCacheKey = "";
@@ -232,7 +228,7 @@ function formatPathAccessDetail(reportedPath, readablePath) {
 async function runDownloadTransferProbe(sourceDir, targetRoot) {
   const probeId = `${process.pid}-${Date.now()}-${randomUUID().slice(0, 8)}`;
   const sourcePath = path.join(sourceDir, `.aurral-transfer-${probeId}.tmp`);
-  const targetDir = path.join(targetRoot, PLAYLIST_LIBRARY_DIR, `.aurral-health-${probeId}`);
+  const targetDir = path.join(targetRoot, `.aurral-health-${probeId}`);
   const targetPath = path.join(targetDir, "transfer.tmp");
   const contents = `aurral transfer health probe ${probeId}\n`;
   let committedPath = null;
@@ -505,23 +501,6 @@ async function checkDownloadsSection() {
               : undefined,
         },
       ),
-    );
-  }
-
-  const playlistLibraryRoot = path.join(downloadFolder, PLAYLIST_LIBRARY_DIR);
-  try {
-    await fs.mkdir(playlistLibraryRoot, { recursive: true });
-    steps.push(
-      healthStep("playlist-root", "pass", "Playlist library folder is ready", {
-        detail: playlistLibraryRoot,
-      }),
-    );
-  } catch (error) {
-    steps.push(
-      healthStep("playlist-root", "fail", "Playlist library folder is ready", {
-        detail: playlistLibraryRoot,
-        fix: error?.message || "Could not create the Aurral playlist library folder.",
-      }),
     );
   }
 
@@ -844,6 +823,49 @@ async function checkNavidromeSection() {
   return buildSection("navidrome", "Navidrome playback", steps);
 }
 
+async function checkNativePlaybackSection() {
+  const library = getCanonicalLibrary({ availableOnly: true });
+  const tracks = Array.isArray(library.tracks) ? library.tracks : [];
+  if (tracks.length === 0) {
+    return buildSection("native-playback", "Aurral-native playback", [
+      healthStep("indexed", "warn", "Canonical media is ready for native playback", {
+        fix: "Connect Lidarr, let the library index refresh, then run Storage Health again.",
+      }),
+    ]);
+  }
+
+  const sample = tracks.slice(0, MEDIA_HEALTH_SAMPLE_LIMIT);
+  const missing = [];
+  for (const track of sample) {
+    let readable = false;
+    for (const file of track.files || []) {
+      if (file.available && file.path && (await checkPathReadable(file.path, file.source))) {
+        readable = true;
+        break;
+      }
+    }
+    if (!readable) {
+      missing.push(track.title || "Unknown Track");
+    }
+  }
+
+  const detail = `${tracks.length} canonical track${tracks.length === 1 ? "" : "s"} indexed`;
+  if (missing.length > 0) {
+    return buildSection("native-playback", "Aurral-native playback", [
+      healthStep("indexed", "fail", "Aurral-native playback can read indexed media", {
+        detail: `${missing.length} sampled track${missing.length === 1 ? " is" : "s are"} missing or unreadable`,
+        fix: "Restore the media mount or rescan the library so stale files become unavailable.",
+      }),
+    ]);
+  }
+
+  return buildSection("native-playback", "Aurral-native playback", [
+    healthStep("indexed", "pass", "Aurral-native playback can read indexed media", {
+      detail,
+    }),
+  ]);
+}
+
 function appendPortablePath(basePath, child) {
   return `${String(basePath || "").trim().replace(/\\/g, "/").replace(/\/+$/, "")}/${child}`;
 }
@@ -924,97 +946,6 @@ async function checkPlexSection() {
   return buildSection("plex", "Plex playback", steps);
 }
 
-async function checkPlaylistFilesSection() {
-  const steps = [];
-  const weeklyFlowRoot = resolveWeeklyFlowRoot();
-  const totalDoneJobs = Number(downloadTracker.getStats()?.done || 0);
-  const doneJobs = downloadTracker.getDoneWithFinalPath(PLAYLIST_FILE_HEALTH_SAMPLE_LIMIT);
-
-  if (doneJobs.length === 0) {
-    return buildSection("playlists", "Playlist files", [], {
-      skipped: true,
-      skipReason: "No completed playlist tracks are available to verify yet.",
-    });
-  }
-
-  let totalMissing = 0;
-  let totalUnreadable = 0;
-  let totalEmpty = 0;
-  let sampleMissing = null;
-  let sampleUnreadable = null;
-  let sampleEmpty = null;
-  for (const job of doneJobs) {
-    const localPath = path.resolve(remapLegacyWeeklyFlowPath(job.finalPath, weeklyFlowRoot));
-    try {
-      const stat = await fs.stat(localPath);
-      if (!stat.isFile()) {
-        totalMissing += 1;
-        if (!sampleMissing) sampleMissing = localPath;
-        continue;
-      }
-      if (stat.size <= 0) {
-        totalEmpty += 1;
-        if (!sampleEmpty) sampleEmpty = localPath;
-      }
-      try {
-        await fs.access(localPath, fs.constants.R_OK);
-      } catch {
-        totalUnreadable += 1;
-        if (!sampleUnreadable) sampleUnreadable = localPath;
-      }
-    } catch {
-      totalMissing += 1;
-      if (!sampleMissing) sampleMissing = localPath;
-    }
-  }
-
-  if (totalMissing > 0) {
-    steps.push(
-      healthStep("tracked", "fail", "Completed playlist files are accessible", {
-        detail: `${totalMissing} of ${doneJobs.length} completed tracks are missing on disk`,
-        fix: sampleMissing
-          ? `Example missing path: ${sampleMissing}. Restore the missing file or fix the mount that should contain it, then update the affected playlist or flow.`
-          : "Restore the missing files or fix the mount that should contain them, then update the affected playlist or flow.",
-      }),
-    );
-    return buildSection("playlists", "Playlist files", steps);
-  }
-
-  if (totalUnreadable > 0) {
-    steps.push(
-      healthStep("tracked-readable", "fail", "Completed playlist files are readable", {
-        detail: `${totalUnreadable} of ${doneJobs.length} completed tracks cannot be read`,
-        fix: sampleUnreadable
-          ? `Example unreadable path: ${sampleUnreadable}. Check ownership, ACLs, and read permissions for the mounted folder.`
-          : "Check ownership, ACLs, and read permissions for the mounted folder.",
-      }),
-    );
-    return buildSection("playlists", "Playlist files", steps);
-  }
-
-  if (totalEmpty > 0) {
-    steps.push(
-      healthStep("tracked-nonempty", "warn", "Completed playlist files are non-empty", {
-        detail: `${totalEmpty} of ${doneJobs.length} completed tracks are zero bytes`,
-        fix: sampleEmpty
-          ? `Example empty path: ${sampleEmpty}. Re-run the affected flow, or remove and add the track again in the affected playlist, so Aurral replaces the empty file.`
-          : "Re-run the affected flow, or remove and add the tracks again in the affected playlist, so Aurral replaces empty files.",
-      }),
-    );
-  }
-
-  steps.push(
-    healthStep("tracked", "pass", "Completed playlist files are accessible", {
-      detail:
-        totalDoneJobs > doneJobs.length
-          ? `${doneJobs.length} of ${totalDoneJobs} completed tracks sampled`
-          : `${doneJobs.length} completed track${doneJobs.length === 1 ? "" : "s"} verified`,
-    }),
-  );
-
-  return buildSection("playlists", "Playlist files", steps);
-}
-
 async function buildStorageHealthCheck() {
   const volumeSection = await checkSharedVolumeSection();
   const downloadsSection = await checkDownloadsSection();
@@ -1025,12 +956,12 @@ async function buildStorageHealthCheck() {
     await checkPathMappingsSection(),
     downloadsSection,
     lidarrSection,
+    await checkNativePlaybackSection(),
     await checkSlskdSection(),
     await checkNzbgetSection(),
     await checkSabnzbdSection(),
     await checkNavidromeSection(),
     await checkPlexSection(),
-    await checkPlaylistFilesSection(),
   ];
 
   const summary = summarizeResult(sections);
