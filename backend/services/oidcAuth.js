@@ -142,7 +142,7 @@ async function fetchEffectiveClaims(oidc, tokens, claims) {
     const userInfo = await client.fetchUserInfo(oidc, tokens.access_token, claims.sub);
     const effectiveClaims = { ...claims, ...userInfo };
     const groupsClaim = getGroupsClaim();
-    if (groupsClaim && claims[groupsClaim] !== undefined) {
+    if (groupsClaim) {
       effectiveClaims[groupsClaim] = claims[groupsClaim];
     }
     return effectiveClaims;

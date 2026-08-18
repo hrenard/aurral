@@ -312,6 +312,31 @@ test("OIDC callback falls back to ID-token claims when UserInfo fails", async ()
   }
 });
 
+test("OIDC groups claim ignores UserInfo-only admin groups", async () => {
+  process.env.OIDC_GROUPS_CLAIM = "groups";
+  process.env.OIDC_ADMIN_GROUPS = "aurral-admins";
+  const pending = await createPendingOidcLogin({
+    idTokenClaims: { preferred_username: "id-token-user" },
+    userInfo: {
+      sub: "oidc-subject",
+      preferred_username: "userinfo-user",
+      groups: ["aurral-admins"],
+    },
+  });
+
+  try {
+    const callback = await handleOidcCallback({
+      query: { state: pending.state, code: "authorization-code" },
+      headers: { cookie: pending.cookie },
+      ip: "127.0.0.1",
+    });
+    assert.equal(callback.user.username, "userinfo-user");
+    assert.equal(callback.user.role, "user");
+  } finally {
+    await pending.close();
+  }
+});
+
 test("OIDC callback rejects an expired state without creating a session", async () => {
   const pending = await createPendingOidcLogin();
   const now = Date.now();
